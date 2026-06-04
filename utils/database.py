@@ -1,6 +1,6 @@
 """
 Supabase (Postgres) persistence layer.
-All credentials come from st.secrets / environment variables.
+All credentials come from st.secrets.
 """
 import streamlit as st
 from supabase import create_client, Client
@@ -15,72 +15,47 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 
-# ─── Schema (run once in Supabase SQL editor) ─────────────────────────────────
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS articles (
-    id                VARCHAR PRIMARY KEY,
-    pmid              VARCHAR,
-    title             TEXT,
-    authors           VARCHAR,
-    journal           VARCHAR,
-    pub_year          INTEGER,
-    pub_date          VARCHAR,
-    doi               VARCHAR,
-    abstract          TEXT,
-    topic             VARCHAR,
-    is_open_access    BOOLEAN DEFAULT FALSE,
-    citation_count    INTEGER DEFAULT 0,
-    citations_per_year FLOAT DEFAULT 0,
-    journal_tier      INTEGER DEFAULT 3,
-    topic_score       FLOAT DEFAULT 0,
-    composite_score   FLOAT DEFAULT 0,
-    is_read           BOOLEAN DEFAULT FALSE,
-    fetched_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS fetch_log (
-    id               SERIAL PRIMARY KEY,
-    fetched_at       TIMESTAMPTZ DEFAULT NOW(),
-    articles_fetched INTEGER,
-    new_articles     INTEGER
-);
-"""
+def _safe_execute(query, label="query"):
+    """Runs a postgrest query and raises with the real error message visible."""
+    try:
+        resp = query.execute()
+        return resp
+    except Exception as e:
+        # Supabase redacts errors in Streamlit Cloud logs — re-raise with full detail
+        msg = str(e)
+        st.error(f"**Supabase error in `{label}`:** {msg}")
+        raise
 
 
-def upsert_articles(records: list[dict]) -> int:
+def upsert_articles(records: list) -> int:
     if not records:
         return 0
     sb = get_supabase()
 
-    # Get existing IDs
-    existing_resp = sb.table("articles").select("id").execute()
+    existing_resp = _safe_execute(sb.table("articles").select("id"), "select existing ids")
     existing_ids = {row["id"] for row in (existing_resp.data or [])}
 
     new_records = [r for r in records if r["id"] not in existing_ids]
     if not new_records:
         return 0
 
-    # Supabase upsert in batches of 100
     for i in range(0, len(new_records), 100):
-        batch = new_records[i:i+100]
-        # Convert datetime to string for JSON serialisation
+        batch = new_records[i:i + 100]
         for rec in batch:
             if isinstance(rec.get("fetched_at"), datetime):
                 rec["fetched_at"] = rec["fetched_at"].isoformat()
-            # Ensure correct types
-            rec["pub_year"] = int(rec.get("pub_year") or 2000)
-            rec["citation_count"] = int(rec.get("citation_count") or 0)
-            rec["journal_tier"] = int(rec.get("journal_tier") or 4)
-            rec["citations_per_year"] = float(rec.get("citations_per_year") or 0)
-            rec["topic_score"] = float(rec.get("topic_score") or 0)
-            rec["composite_score"] = float(rec.get("composite_score") or 0)
-            rec["is_open_access"] = bool(rec.get("is_open_access", False))
-            rec["is_read"] = False
+            rec["pub_year"]          = int(rec.get("pub_year") or 2000)
+            rec["citation_count"]    = int(rec.get("citation_count") or 0)
+            rec["journal_tier"]      = int(rec.get("journal_tier") or 4)
+            rec["citations_per_year"]= float(rec.get("citations_per_year") or 0)
+            rec["topic_score"]       = float(rec.get("topic_score") or 0)
+            rec["composite_score"]   = float(rec.get("composite_score") or 0)
+            rec["is_open_access"]    = bool(rec.get("is_open_access", False))
+            rec["is_read"]           = False
             for col in ["id", "pmid", "title", "authors", "journal",
                         "pub_date", "doi", "abstract", "topic"]:
                 rec[col] = str(rec.get(col) or "")
-
-        sb.table("articles").upsert(batch).execute()
+        _safe_execute(sb.table("articles").upsert(batch), f"upsert batch {i//100+1}")
 
     return len(new_records)
 
@@ -108,48 +83,54 @@ def get_articles(
         query = query.ilike("journal", f"%{journal}%")
     query = query.gte("pub_year", year_min)
 
-    # Sorting
     sort_map = {
-        "Composite Score ↓":  ("composite_score", False),
-        "Date (Newest First)": ("pub_year", False),
-        "Citation Velocity ↓": ("citations_per_year", False),
-        "Journal Prestige ↓":  ("journal_tier", True),
+        "Composite Score ↓":   ("composite_score",   False),
+        "Date (Newest First)":  ("pub_year",          False),
+        "Citation Velocity ↓":  ("citations_per_year",False),
+        "Journal Prestige ↓":   ("journal_tier",      True),
     }
     col, asc = sort_map.get(sort_by, ("composite_score", False))
-    query = query.order(col, desc=not asc)
+    query = query.order(col, desc=not asc).limit(500)
 
-    resp = query.limit(500).execute()
+    resp = _safe_execute(query, "get_articles")
     data = resp.data or []
     return pd.DataFrame(data) if data else pd.DataFrame()
 
 
 def toggle_read(article_id: str, current: bool):
     sb = get_supabase()
-    sb.table("articles").update({"is_read": not current}).eq("id", article_id).execute()
+    _safe_execute(
+        sb.table("articles").update({"is_read": not current}).eq("id", article_id),
+        "toggle_read"
+    )
 
 
 def log_fetch(articles_fetched: int, new_articles: int):
     sb = get_supabase()
-    sb.table("fetch_log").insert({
-        "articles_fetched": articles_fetched,
-        "new_articles": new_articles
-    }).execute()
+    _safe_execute(
+        sb.table("fetch_log").insert({
+            "articles_fetched": articles_fetched,
+            "new_articles": new_articles
+        }),
+        "log_fetch"
+    )
 
 
 def get_stats() -> dict:
     sb = get_supabase()
     try:
-        total = sb.table("articles").select("id", count="exact").execute().count or 0
+        total  = sb.table("articles").select("id", count="exact").execute().count or 0
         unread = sb.table("articles").select("id", count="exact").eq("is_read", False).execute().count or 0
-        oa = sb.table("articles").select("id", count="exact").eq("is_open_access", True).execute().count or 0
+        oa     = sb.table("articles").select("id", count="exact").eq("is_open_access", True).execute().count or 0
         log_resp = sb.table("fetch_log").select("fetched_at").order("fetched_at", desc=True).limit(1).execute()
         last_dt = None
         if log_resp.data:
-            last_dt = datetime.fromisoformat(log_resp.data[0]["fetched_at"].replace("Z", "+00:00"))
+            raw = log_resp.data[0]["fetched_at"]
+            last_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         last_fetch = last_dt.strftime("%d %b %H:%M") if last_dt else None
         next_fetch = (last_dt + timedelta(days=7)).strftime("%d %b") if last_dt else None
     except Exception as e:
-        print(f"Stats error: {e}")
+        st.warning(f"Stats error (non-fatal): {e}")
         total, unread, oa, last_fetch, next_fetch = 0, 0, 0, None, None
     return {"total": total, "unread": unread, "open_access": oa,
             "last_fetch": last_fetch, "next_fetch": next_fetch}
@@ -160,7 +141,8 @@ def get_last_fetch_time():
     try:
         resp = sb.table("fetch_log").select("fetched_at").order("fetched_at", desc=True).limit(1).execute()
         if resp.data:
-            return datetime.fromisoformat(resp.data[0]["fetched_at"].replace("Z", "+00:00"))
+            raw = resp.data[0]["fetched_at"]
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except Exception:
         pass
     return None
