@@ -1,16 +1,17 @@
 """
-Fetches articles from PubMed (E-utilities) and enriches with Semantic Scholar
-citation data. Computes composite relevance scores.
+Fetches articles from PubMed + Semantic Scholar. Supports both built-in
+and custom (user-defined) topics.
 """
 import requests
 import xml.etree.ElementTree as ET
 import hashlib
 import math
 import time
+import json
 from datetime import datetime
 from typing import Optional
 
-# ─── Topic Search Queries ─────────────────────────────────────────────────────
+# ─── Built-in Topics ──────────────────────────────────────────────────────────
 TOPICS = {
     "meniscus": {
         "label": "Knee Meniscus Pain",
@@ -46,7 +47,6 @@ TOPICS = {
     },
 }
 
-# ─── Journal Tiers ────────────────────────────────────────────────────────────
 JOURNAL_TIERS = {
     1: [
         "british journal of sports medicine",
@@ -57,35 +57,25 @@ JOURNAL_TIERS = {
         "jospt",
     ],
     2: [
-        "journal of physiotherapy",
-        "physical therapy",
-        "clinical rehabilitation",
-        "osteoarthritis and cartilage",
-        "menopause",
-        "journal of bone and joint surgery",
-        "knee surgery sports traumatology arthroscopy",
-        "arthroscopy",
-        "physiotherapy",
+        "journal of physiotherapy", "physical therapy", "clinical rehabilitation",
+        "osteoarthritis and cartilage", "menopause", "journal of bone and joint surgery",
+        "knee surgery sports traumatology arthroscopy", "arthroscopy", "physiotherapy",
     ],
     3: [
-        "physical therapy in sport",
-        "journal of sport rehabilitation",
+        "physical therapy in sport", "journal of sport rehabilitation",
         "international journal of sports physical therapy",
-        "musculoskeletal science and practice",
-        "pm&r",
-        "disability and rehabilitation",
+        "musculoskeletal science and practice", "pm&r", "disability and rehabilitation",
         "scandinavian journal of medicine & science in sports",
     ],
 }
 TIER_SCORES = {1: 100, 2: 70, 3: 40, 4: 20}
 
-PUBMED_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+PUBMED_BASE          = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 SEMANTIC_SCHOLAR_BASE = "https://api.semanticscholar.org/graph/v1"
 
 MONTH_MAP = {
-    "jan": "01", "feb": "02", "mar": "03", "apr": "04",
-    "may": "05", "jun": "06", "jul": "07", "aug": "08",
-    "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+    "jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06",
+    "jul":"07","aug":"08","sep":"09","oct":"10","nov":"11","dec":"12",
 }
 
 
@@ -102,13 +92,9 @@ def get_journal_tier(journal_name: str) -> int:
 def pubmed_search(query: str, max_results: int = 30) -> list:
     try:
         resp = requests.get(f"{PUBMED_BASE}/esearch.fcgi", params={
-            "db": "pubmed",
-            "term": query + "[Title/Abstract]",
-            "retmax": max_results,
-            "retmode": "json",
-            "sort": "relevance",
-            "datetype": "pdat",
-            "mindate": "2015",
+            "db": "pubmed", "term": query + "[Title/Abstract]",
+            "retmax": max_results, "retmode": "json", "sort": "relevance",
+            "datetype": "pdat", "mindate": "2015",
             "maxdate": str(datetime.now().year),
         }, timeout=15)
         resp.raise_for_status()
@@ -123,10 +109,8 @@ def pubmed_fetch_details(pmids: list) -> list:
         return []
     try:
         resp = requests.get(f"{PUBMED_BASE}/efetch.fcgi", params={
-            "db": "pubmed",
-            "id": ",".join(pmids),
-            "retmode": "xml",
-            "rettype": "abstract",
+            "db": "pubmed", "id": ",".join(pmids),
+            "retmode": "xml", "rettype": "abstract",
         }, timeout=30)
         resp.raise_for_status()
         return parse_pubmed_xml(resp.text)
@@ -146,8 +130,7 @@ def parse_pubmed_xml(xml_text: str) -> list:
         try:
             med = article_node.find("MedlineCitation")
             art = med.find("Article")
-
-            pmid = med.findtext("PMID", "")
+            pmid  = med.findtext("PMID", "")
             title = (art.findtext("ArticleTitle", "") or "").strip()
 
             abstract_parts = art.findall(".//AbstractText")
@@ -157,7 +140,6 @@ def parse_pubmed_xml(xml_text: str) -> list:
             ).strip()
 
             journal = art.findtext("Journal/Title", "") or art.findtext("Journal/ISOAbbreviation", "") or ""
-
             doi = ""
             for id_node in article_node.findall(".//ArticleId"):
                 if id_node.get("IdType") == "doi":
@@ -182,27 +164,19 @@ def parse_pubmed_xml(xml_text: str) -> list:
                 authors = ", ".join(names)
 
             year_node = art.find(".//PubDate/Year")
-            pub_year = int(year_node.text) if year_node is not None and year_node.text else 2020
-
+            pub_year  = int(year_node.text) if year_node is not None and year_node.text else 2020
             month_raw = art.findtext(".//PubDate/Month", "01") or "01"
-            month = MONTH_MAP.get(month_raw[:3].lower(), "01") if not month_raw.isdigit() else month_raw.zfill(2)
-            pub_date = f"{pub_year}-{month}"
+            month     = MONTH_MAP.get(month_raw[:3].lower(), "01") if not month_raw.isdigit() else month_raw.zfill(2)
+            pub_date  = f"{pub_year}-{month}"
 
             articles.append({
-                "pmid": pmid,
-                "title": title,
-                "authors": authors,
-                "journal": journal,
-                "pub_year": pub_year,
-                "pub_date": pub_date,
-                "doi": doi,
-                "abstract": abstract,
-                "is_open_access": is_oa,
+                "pmid": pmid, "title": title, "authors": authors,
+                "journal": journal, "pub_year": pub_year, "pub_date": pub_date,
+                "doi": doi, "abstract": abstract, "is_open_access": is_oa,
             })
         except Exception as e:
             print(f"Parse error: {e}")
             continue
-
     return articles
 
 
@@ -211,8 +185,7 @@ def get_semantic_scholar_citations(doi: str = "", title: str = "") -> Optional[d
         if doi:
             resp = requests.get(
                 f"{SEMANTIC_SCHOLAR_BASE}/paper/DOI:{doi}",
-                params={"fields": "citationCount,year,openAccessPdf"},
-                timeout=10,
+                params={"fields": "citationCount,year,openAccessPdf"}, timeout=10,
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -231,19 +204,18 @@ def get_semantic_scholar_citations(doi: str = "", title: str = "") -> Optional[d
     return None
 
 
-def compute_topic_score(title: str, abstract: str, topic_key: str) -> float:
-    keywords = TOPICS[topic_key]["keywords"]
+def compute_topic_score(title: str, abstract: str, keywords: list) -> float:
     text = (title + " " + abstract).lower()
     hits = sum(1 for kw in keywords if kw.lower() in text)
     return min(100.0, (hits / max(len(keywords), 1)) * 150)
 
 
 def compute_composite_score(pub_year, citations_per_year, journal_tier, topic_score, is_open_access) -> float:
-    age = max(0, datetime.now().year - pub_year)
-    recency = max(0, 100 * (0.84 ** age))
+    age       = max(0, datetime.now().year - pub_year)
+    recency   = max(0, 100 * (0.84 ** age))
     cit_score = min(100, math.log1p(citations_per_year) / math.log1p(10) * 100)
-    prestige = TIER_SCORES.get(journal_tier, 20)
-    oa = 100 if is_open_access else 0
+    prestige  = TIER_SCORES.get(journal_tier, 20)
+    oa        = 100 if is_open_access else 0
     return round(0.30 * recency + 0.35 * cit_score + 0.20 * prestige + 0.10 * topic_score + 0.05 * oa, 2)
 
 
@@ -251,49 +223,90 @@ def make_id(pmid: str, topic: str) -> str:
     return hashlib.md5(f"{pmid}_{topic}".encode()).hexdigest()[:16]
 
 
+def _fetch_topic(topic_key: str, queries: list, keywords: list) -> list:
+    """Fetch and score articles for a single topic. Used by both run_fetch and custom topic fetch."""
+    from utils.database import upsert_articles
+    seen_pmids: set = set()
+    records = []
+
+    for query in queries:
+        pmids     = pubmed_search(query, max_results=25)
+        new_pmids = [p for p in pmids if p not in seen_pmids]
+        seen_pmids.update(new_pmids)
+        if not new_pmids:
+            continue
+
+        articles = pubmed_fetch_details(new_pmids)
+        for art in articles:
+            art["topic"] = topic_key
+            art["id"]    = make_id(art["pmid"], topic_key)
+
+            ss = get_semantic_scholar_citations(doi=art.get("doi", ""), title=art["title"])
+            citations = 0
+            if ss:
+                citations = ss.get("citationCount") or 0
+                if ss.get("openAccessPdf"):
+                    art["is_open_access"] = True
+
+            age = max(1, datetime.now().year - art["pub_year"])
+            art["citation_count"]     = citations
+            art["citations_per_year"] = round(citations / age, 2)
+            art["journal_tier"]       = get_journal_tier(art["journal"])
+            art["topic_score"]        = compute_topic_score(art["title"], art["abstract"], keywords)
+            art["composite_score"]    = compute_composite_score(
+                art["pub_year"], art["citations_per_year"],
+                art["journal_tier"], art["topic_score"], art["is_open_access"]
+            )
+            art["fetched_at"] = datetime.now()
+            records.append(art)
+            time.sleep(0.12)
+
+        time.sleep(0.35)
+
+    return records
+
+
 def run_fetch() -> dict:
-    from utils.database import upsert_articles, log_fetch
+    """Full fetch for all built-in + custom topics."""
+    from utils.database import upsert_articles, log_fetch, get_custom_topics
 
     all_records = []
 
+    # Built-in topics
     for topic_key, topic_info in TOPICS.items():
-        seen_pmids: set = set()
+        records = _fetch_topic(topic_key, topic_info["queries"], topic_info["keywords"])
+        all_records.extend(records)
 
-        for query in topic_info["queries"]:
-            pmids = pubmed_search(query, max_results=25)
-            new_pmids = [p for p in pmids if p not in seen_pmids]
-            seen_pmids.update(new_pmids)
-            if not new_pmids:
-                continue
-
-            articles = pubmed_fetch_details(new_pmids)
-
-            for art in articles:
-                art["topic"] = topic_key
-                art["id"] = make_id(art["pmid"], topic_key)
-
-                ss = get_semantic_scholar_citations(doi=art.get("doi", ""), title=art["title"])
-                citations = 0
-                if ss:
-                    citations = ss.get("citationCount") or 0
-                    if ss.get("openAccessPdf"):
-                        art["is_open_access"] = True
-
-                age = max(1, datetime.now().year - art["pub_year"])
-                art["citation_count"] = citations
-                art["citations_per_year"] = round(citations / age, 2)
-                art["journal_tier"] = get_journal_tier(art["journal"])
-                art["topic_score"] = compute_topic_score(art["title"], art["abstract"], topic_key)
-                art["composite_score"] = compute_composite_score(
-                    art["pub_year"], art["citations_per_year"],
-                    art["journal_tier"], art["topic_score"], art["is_open_access"]
-                )
-                art["fetched_at"] = datetime.now()
-                all_records.append(art)
-                time.sleep(0.12)
-
-            time.sleep(0.35)
+    # Custom topics from Supabase
+    try:
+        custom = get_custom_topics()
+        for ct in custom:
+            queries  = json.loads(ct["queries"])
+            keywords = [k.strip() for k in ct["keywords_csv"].split(",") if k.strip()]
+            records  = _fetch_topic(ct["id"], queries, keywords)
+            all_records.extend(records)
+    except Exception as e:
+        print(f"Custom topic fetch error (non-fatal): {e}")
 
     new_count = upsert_articles(all_records)
     log_fetch(len(all_records), new_count)
     return {"success": True, "new_articles": new_count, "total_fetched": len(all_records)}
+
+
+def fetch_custom_topic_now(topic_id: str, queries: list, keywords: list) -> dict:
+    """Fetch a single custom topic immediately after it's created."""
+    from utils.database import upsert_articles
+    records   = _fetch_topic(topic_id, queries, keywords)
+    new_count = upsert_articles(records)
+    return {"success": True, "new_articles": new_count, "total_fetched": len(records)}
+
+
+def build_queries_for_keyword(keyword: str) -> list:
+    """Auto-generate PubMed queries from a free-text keyword."""
+    kw = keyword.strip()
+    return [
+        f"{kw} physiotherapy treatment",
+        f"{kw} rehabilitation outcomes",
+        f"{kw} physical therapy clinical",
+        f"{kw} musculoskeletal management",
+    ]

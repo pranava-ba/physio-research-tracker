@@ -1,7 +1,7 @@
--- Run this once in your Supabase project:
--- Dashboard → SQL Editor → paste this → Run
+-- Run this in Supabase → SQL Editor → New query → Run
+-- Creates both tables explicitly in the public schema.
 
-CREATE TABLE IF NOT EXISTS articles (
+CREATE TABLE IF NOT EXISTS public.articles (
     id                VARCHAR PRIMARY KEY,
     pmid              VARCHAR,
     title             TEXT,
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS articles (
     fetched_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS fetch_log (
+CREATE TABLE IF NOT EXISTS public.fetch_log (
     id               SERIAL PRIMARY KEY,
     fetched_at       TIMESTAMPTZ DEFAULT NOW(),
     articles_fetched INTEGER,
